@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GTA-style 3D Starter</title>
+  <style>
+    html, body { margin:0; width:100%; height:100%; overflow:hidden; background:#8fc7df; font-family:Arial,sans-serif; }
+    canvas { display:block; }
+    #help {
+      position:fixed; left:16px; bottom:16px; color:white; background:rgba(0,0,0,.48);
+      padding:10px 13px; border-radius:8px; font-size:13px; line-height:1.5;
+      user-select:none; pointer-events:none; text-shadow:0 1px 2px #000;
+    }
+    #status {
+      position:fixed; right:16px; top:16px; color:white; background:rgba(0,0,0,.42);
+      padding:8px 11px; border-radius:8px; font-size:12px; pointer-events:none;
+    }
+    #error { position:fixed; inset:0; display:none; place-items:center; color:white; text-align:center;
+      background:rgba(0,0,0,.78); padding:24px; box-sizing:border-box; }
+  </style>
+</head>
+<body>
+  <div id="error"></div>
+
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+      }
+    }
+  </script>
+  <script type="module">
+    import * as THREE from 'three';
+    import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+
+    const status = { textContent: '' };
+    const errorBox = document.querySelector('#error');
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x9bcfe3);
+    scene.fog = new THREE.Fog(0x9bcfe3, 65, 190);
+
+    const camera = new THREE.PerspectiveCamera(65, innerWidth / innerHeight, 0.1, 500);
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    renderer.setSize(innerWidth, innerHeight);
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.12;
+    document.body.appendChild(renderer.domElement);
+
+    scene.add(new THREE.HemisphereLight(0xdff4ff, 0x64734f, 2.0));
+    const sun = new THREE.DirectionalLight(0xfff1d6, 2.4);
+    sun.position.set(-35, 55, 25);
+    sun.castShadow = true;
+    sun.shadow.mapSize.set(2048, 2048);
+    sun.shadow.camera.left = -55; sun.shadow.camera.right = 55;
+    sun.shadow.camera.top = 55; sun.shadow.camera.bottom = -55;
+    sun.shadow.bias = -0.00025;
+    scene.add(sun);
+
+    // Large, simple ground plane.
+    const ground = new THREE.Mesh(
+      new THREE.PlaneGeometry(500, 500),
+      new THREE.MeshStandardMaterial({ color: 0x668d55, roughness: 1 })
+    );
+    ground.rotation.x = -Math.PI / 2;
+    ground.receiveShadow = true;
+    scene.add(ground);
+
+    // A subtle grid gives the otherwise-flat test map a sense of scale.
+    const grid = new THREE.GridHelper(500, 100, 0x526e49, 0x78946b);
+    grid.position.y = 0.012;
+    grid.material.transparent = true;
+    grid.material.opacity = 0.22;
+    scene.add(grid);
+
+    const playerRoot = new THREE.Group();
+    scene.add(playerRoot);
+    let playerVisual = null;
+    let mixer = null;
+    let walkAction = null;
+    let idleAction = null;
+    let activeAction = null;
+
+    const loader = new FBXLoader();
+
+    // Fallback capsule is shown if player.fbx hasn't been added yet.
+    function makeFallbackPlayer() {
+      const group = new THREE.Group();
+      const body = new THREE.Mesh(
+        new THREE.CapsuleGeometry(0.38, 0.9, 6, 12),
+        new THREE.MeshStandardMaterial({ color: 0x263b59, roughness: 0.72 })
+      );
+      body.position.y = 0.83;
+      body.castShadow = true;
+      group.add(body);
+      const head = new THREE.Mesh(
+        new THREE.SphereGeometry(0.25, 16, 12),
+        new THREE.MeshStandardMaterial({ color: 0xd6a47d, roughness: 0.8 })
+      );
+      head.position.y = 1.55;
+      head.castShadow = true;
+      group.add(head);
+      return group;
+    }
+
+    function showError(message) {
+      errorBox.style.display = 'grid';
+      errorBox.innerHTML = message;
+    }
+
+    loader.load('./assets/player/player.fbx', (gltf) => {
+      playerVisual = gltf;
+      playerVisual.traverse(o => {
+        if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; }
+      });
+      playerRoot.add(playerVisual);
+      status.textContent = 'Player loaded';
+      loadWalkAnimation();
+    }, undefined, () => {
+      playerVisual = makeFallbackPlayer();
+      playerRoot.add(playerVisual);
+      status.textContent = 'Fallback character — add player.fbx';
+      loadWalkAnimation();
+    });
+
+    function loadWalkAnimation() {
+      // Both clips are loaded separately, then blended on the player's rig.
+      // Their skeleton/node names must match the nodes in player.fbx.
+      mixer = new THREE.AnimationMixer(playerRoot);
+
+      loader.load('./assets/player/walking.fbx', (gltf) => {
+        const clips = gltf.animations || [];
+        if (!clips.length) {
+          status.textContent = 'walking.fbx contains no animation';
+          return;
+        }
+
+        const clip = clips.find(a => /walk/i.test(a.name)) || clips[0];
+        walkAction = mixer.clipAction(clip);
+        walkAction.setLoop(THREE.LoopRepeat);
+        walkAction.enabled = true;
+        walkAction.setEffectiveWeight(1);
+
+        if (!activeAction && idleAction) {
+          idleAction.reset().fadeIn(0.2).play();
+          activeAction = idleAction;
+        } else if (!idleAction) {
+          status.textContent = 'Walking animation loaded — add assets/idle.fbx';
+        }
+      }, undefined, () => {
+        status.textContent = 'Could not load assets/walking.fbx';
+      });
+
+      loader.load('./assets/player/idle.fbx', (gltf) => {
+        const clips = gltf.animations || [];
+        if (!clips.length) {
+          status.textContent = 'idle.fbx contains no animation';
+          return;
+        }
+
+        const clip = clips.find(a => /idle/i.test(a.name)) || clips[0];
+        idleAction = mixer.clipAction(clip);
+        idleAction.setLoop(THREE.LoopRepeat);
+        idleAction.enabled = true;
+        idleAction.setEffectiveWeight(1);
+
+        const speed = Math.hypot(velocity.x, velocity.z);
+        if (speed < 0.25 && !activeAction) {
+          idleAction.reset().fadeIn(0.2).play();
+          activeAction = idleAction;
+        }
+
+        status.textContent = walkAction
+          ? 'Player + idle + walk animations loaded'
+          : 'Idle animation loaded — loading walk';
+      }, undefined, () => {
+        status.textContent = 'Idle animation unavailable — add assets/idle.fbx';
+      });
+    }
+
+    function transitionToAction(nextAction, fadeDuration = 0.25) {
+      if (!nextAction || activeAction === nextAction) return;
+
+      nextAction.enabled = true;
+      nextAction.reset();
+      nextAction.setEffectiveTimeScale(1);
+      nextAction.setEffectiveWeight(1);
+      nextAction.play();
+
+      if (activeAction) {
+        activeAction.crossFadeTo(nextAction, fadeDuration, false);
+      } else {
+        nextAction.fadeIn(fadeDuration);
+      }
+
+      activeAction = nextAction;
+    }
+
+    // Movement uses acceleration and drag rather than snapping to a target speed.
+    const keys = new Set();
+    addEventListener('keydown', e => {
+      if (['KeyW','KeyA','KeyS','KeyD','ShiftLeft','ShiftRight','Space'].includes(e.code)) e.preventDefault();
+      keys.add(e.code);
+    });
+    addEventListener('keyup', e => keys.delete(e.code));
+    addEventListener('blur', () => keys.clear());
+
+    const velocity = new THREE.Vector3();
+    const desired = new THREE.Vector3();
+    const forward = new THREE.Vector3();
+    const right = new THREE.Vector3();
+    const clock = new THREE.Clock();
+
+    let cameraYaw = 0;
+    let cameraPitch = 0.24;
+    let cameraDistance = 7.2;
+    let dragging = false;
+    let lastX = 0, lastY = 0;
+
+    renderer.domElement.addEventListener('pointerdown', e => {
+      dragging = true; lastX = e.clientX; lastY = e.clientY;
+      renderer.domElement.setPointerCapture(e.pointerId);
+    });
+    renderer.domElement.addEventListener('pointerup', () => dragging = false);
+    renderer.domElement.addEventListener('pointermove', e => {
+      if (!dragging) return;
+      cameraYaw -= (e.clientX - lastX) * 0.005;
+      cameraPitch = THREE.MathUtils.clamp(cameraPitch + (e.clientY - lastY) * 0.003, -0.05, 0.85);
+      lastX = e.clientX; lastY = e.clientY;
+    });
+    renderer.domElement.addEventListener('wheel', e => {
+      cameraDistance = THREE.MathUtils.clamp(cameraDistance + e.deltaY * 0.008, 3.2, 13);
+    }, { passive: true });
+
+    // Camera starts behind the character.
+    cameraYaw = Math.PI;
+
+    function smoothDampVector(current, target, rate, dt) {
+      const alpha = 1 - Math.exp(-rate * dt);
+      current.lerp(target, alpha);
+    }
+
+    function animate() {
+      requestAnimationFrame(animate);
+      const dt = Math.min(clock.getDelta(), 0.05);
+
+      const inputX = (keys.has('KeyD') ? 1 : 0) - (keys.has('KeyA') ? 1 : 0);
+      const inputZ = (keys.has('KeyS') ? 1 : 0) - (keys.has('KeyW') ? 1 : 0);
+
+      forward.set(-Math.sin(cameraYaw), 0, -Math.cos(cameraYaw));
+      right.set(Math.cos(cameraYaw), 0, -Math.sin(cameraYaw));
+      desired.set(0, 0, 0)
+        .addScaledVector(right, inputX)
+        .addScaledVector(forward, -inputZ);
+
+      if (desired.lengthSq() > 1) desired.normalize();
+
+      const sprinting = keys.has('ShiftLeft') || keys.has('ShiftRight');
+      const maxSpeed = sprinting ? 7.0 : 3.6;
+      if (desired.lengthSq() > 0) desired.multiplyScalar(maxSpeed);
+
+      // Faster acceleration while moving, gentler braking for a GTA-like coast to a stop.
+      const accelerating = desired.lengthSq() > 0;
+      const response = accelerating ? 4.2 : 2.25;
+      smoothDampVector(velocity, desired, response, dt);
+
+      playerRoot.position.addScaledVector(velocity, dt);
+
+      const horizontalSpeed = Math.hypot(velocity.x, velocity.z);
+
+      // Face the direction the character is actually travelling, not raw key input.
+      // Velocity changes gradually, so the body naturally catches up after direction changes.
+      if (horizontalSpeed > 0.16) {
+        const targetYaw = Math.atan2(velocity.x, velocity.z);
+        const angleDiff = THREE.MathUtils.euclideanModulo(
+          targetYaw - playerRoot.rotation.y + Math.PI,
+          Math.PI * 2
+        ) - Math.PI;
+
+        // Turn more deliberately at low speed and more responsively at higher speed.
+        const speedFactor = THREE.MathUtils.clamp(horizontalSpeed / 7.0, 0, 1);
+        const turnRate = THREE.MathUtils.lerp(3.2, 8.5, speedFactor);
+        const turnAlpha = 1 - Math.exp(-turnRate * dt);
+        playerRoot.rotation.y += angleDiff * turnAlpha;
+      }
+      // Below the movement threshold, preserve the current facing direction.
+
+      const moving = horizontalSpeed > 0.28;
+      if (moving && walkAction) {
+        transitionToAction(walkAction, 0.22);
+        walkAction.setEffectiveTimeScale(
+          THREE.MathUtils.clamp(horizontalSpeed / 3.6, 0.65, 1.9)
+        );
+      } else if (!moving && idleAction) {
+        transitionToAction(idleAction, 0.3);
+      }
+
+      if (mixer) mixer.update(dt);
+
+      // Smooth third-person follow camera, with orbit and zoom.
+      const focus = playerRoot.position.clone().add(new THREE.Vector3(0, 1.25, 0));
+      const horizontal = Math.cos(cameraPitch) * cameraDistance;
+      const cameraOffset = new THREE.Vector3(
+        Math.sin(cameraYaw) * horizontal,
+        Math.sin(cameraPitch) * cameraDistance + 0.6,
+        Math.cos(cameraYaw) * horizontal
+      );
+      const cameraTarget = focus.clone().add(cameraOffset);
+      smoothDampVector(camera.position, cameraTarget, 7.5, dt);
+      camera.lookAt(focus);
+
+      renderer.render(scene, camera);
+    }
+
+    camera.position.set(0, 4, 8);
+    animate();
+
+    addEventListener('resize', () => {
+      camera.aspect = innerWidth / innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+      renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    });
+  </script>
+</body>
+</html>
